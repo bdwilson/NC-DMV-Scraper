@@ -1,5 +1,12 @@
 NC-DMV-Scraper is a tool you can use to become aware of DMV appointments right when they become available, without all the extra work of constantly manually monitoring the DMV website.
 
+<b> for the pushover version, you need to build this yourself: 
+<code> # docker build -t nc-dmv-scraper . </code>
+Edit docker-compose.yml with your details then
+<code> # docker compose up -d </code>
+
+</b>
+
 ![example](exampleoutput.png)
 
 It uses selenium to scrape appointment locations, dates, and times, from https://skiptheline.ncdot.gov/.

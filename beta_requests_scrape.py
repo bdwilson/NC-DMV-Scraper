@@ -14,9 +14,12 @@ import random
 
 # --- Notification Settings ---
 YOUR_DISCORD_WEBHOOK_URL = os.getenv("YOUR_DISCORD_WEBHOOK_URL", "YOUR_WEBHOOK_URL_HERE")
+PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "")
+PUSHOVER_USER_KEYS = [k.strip() for k in os.getenv("PUSHOVER_USER_KEY", "").split(",") if k.strip()]
 PROOF_OF_LIFE = os.getenv("PROOF_OF_LIFE", "False").lower() == 'true'
 INTRO_MESSAGE = os.getenv("INTRO_MESSAGE", "@everyone NCDMV Appointments Found at https://skiptheline.ncdot.gov/:\n")
 MAX_DISCORD_MESSAGE_LENGTH = 1950
+MAX_PUSHOVER_MESSAGE_LENGTH = 1000  # Pushover's limit is 1024, using 1000 for safety
 
 # --- Locations Data ---
 # Path to your locations.json file
@@ -339,9 +342,63 @@ def get_locations_within_distance(user_address_str, max_distance_miles_str, all_
     return allowed_location_names, user_coords_str
 
 
-def send_discord_notification(webhook_url, message_content_to_send):
+def send_notification(webhook_url, message_content_to_send):
+    # --- Pushover ---
+    if PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEYS:
+        if message_content_to_send is None:
+            if PROOF_OF_LIFE:
+                print("Sending Pushover proof-of-life notification (no appointments found).")
+                for user_key in PUSHOVER_USER_KEYS:
+                    try:
+                        requests.post("https://api.pushover.net/1/messages.json", data={
+                            "token": PUSHOVER_APP_TOKEN,
+                            "user": user_key,
+                            "title": "NCDMV Scraper",
+                            "message": "No valid NCDMV appointments found at this time matching your criteria.",
+                        }, timeout=10)
+                        print(f"Pushover proof-of-life notification sent to ...{user_key[-4:]}.")
+                    except requests.exceptions.RequestException as e:
+                        print(f"Error sending Pushover proof-of-life notification to ...{user_key[-4:]}: {e}")
+            else:
+                print("No appointments found and PROOF_OF_LIFE is False. No notification sent.")
+            return
+
+        full_message = INTRO_MESSAGE + message_content_to_send
+        chunks = []
+        remaining = full_message
+        while remaining:
+            if len(remaining) <= MAX_PUSHOVER_MESSAGE_LENGTH:
+                chunks.append(remaining)
+                remaining = ""
+            else:
+                split_index = remaining.rfind('\n', 0, MAX_PUSHOVER_MESSAGE_LENGTH)
+                if split_index == -1:
+                    split_index = MAX_PUSHOVER_MESSAGE_LENGTH
+                chunks.append(remaining[:split_index])
+                remaining = remaining[split_index:].lstrip()
+
+        print(f"Sending Pushover notification in {len(chunks)} chunk(s) to {len(PUSHOVER_USER_KEYS)} recipient(s)...")
+        for user_key in PUSHOVER_USER_KEYS:
+            for i, chunk in enumerate(chunks):
+                try:
+                    response = requests.post("https://api.pushover.net/1/messages.json", data={
+                        "token": PUSHOVER_APP_TOKEN,
+                        "user": user_key,
+                        "title": "NCDMV Appointments",
+                        "message": chunk,
+                    }, timeout=15)
+                    response.raise_for_status()
+                    print(f"Pushover chunk {i+1}/{len(chunks)} sent to ...{user_key[-4:]}.")
+                    if i < len(chunks) - 1:
+                        time.sleep(1)
+                except requests.exceptions.RequestException as e:
+                    print(f"Error sending Pushover chunk {i+1} to ...{user_key[-4:]}: {e}")
+                    break
+        return
+
+    # --- Discord / ntfy.sh ---
     if not webhook_url or webhook_url == "YOUR_WEBHOOK_URL_HERE":
-        print("Webhook URL not configured. Skipping notification.")
+        print("No notification method configured. Skipping notification.")
         return
 
     if message_content_to_send is None:
@@ -697,8 +754,9 @@ if __name__ == "__main__":
         print(f"Error loading or parsing '{LOCATIONS_JSON_FILE}': {e}")
         exit(1)
 
-    if YOUR_DISCORD_WEBHOOK_URL == "YOUR_WEBHOOK_URL_HERE":
-        print("!!! WARNING: Discord webhook URL is not set. Notifications will be skipped. !!!")
+    if YOUR_DISCORD_WEBHOOK_URL == "YOUR_WEBHOOK_URL_HERE" and not (PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEYS):
+        print("!!! WARNING: No notification method configured. Notifications will be skipped. !!!")
+        print("!!! Set YOUR_DISCORD_WEBHOOK_URL, or set both PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEY. !!!")
 
     config = parse_and_validate_configs(all_locations_data_main)
     run_count = 0
@@ -720,9 +778,9 @@ if __name__ == "__main__":
             average_run_duration_seconds = total_run_duration_seconds / run_count
 
             if notification_payload_data:
-                send_discord_notification(YOUR_DISCORD_WEBHOOK_URL, notification_payload_data)
+                send_notification(YOUR_DISCORD_WEBHOOK_URL, notification_payload_data)
             else:
-                send_discord_notification(YOUR_DISCORD_WEBHOOK_URL, None)
+                send_notification(YOUR_DISCORD_WEBHOOK_URL, None)
             random_offset = random.uniform(random_offset_min_s, random_offset_max_s)
             total_sleep_seconds = base_interval_seconds + random_offset
             if total_sleep_seconds < 1:

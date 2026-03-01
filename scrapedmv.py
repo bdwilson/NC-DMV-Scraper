@@ -19,6 +19,8 @@ import calendar
 # --- Configuration ---
 
 YOUR_DISCORD_WEBHOOK_URL = os.getenv("YOUR_DISCORD_WEBHOOK_URL", "YOUR_WEBHOOK_URL_HERE") # !!! REPLACE WITH YOUR ACTUAL WEBHOOK URL !!!
+PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "")
+PUSHOVER_USER_KEYS = [k.strip() for k in os.getenv("PUSHOVER_USER_KEY", "").split(",") if k.strip()]
 GECKODRIVER_PATH = os.getenv('GECKODRIVER_PATH','YOUR_GECKODRIVER_PATH_HERE') # Replace with your geckodriver path
 
 # Can change address via environment values or manually edit this code 
@@ -64,12 +66,10 @@ MIN_RANDOM_DELAY_SECONDS = 10
 MAX_RANDOM_DELAY_SECONDS = 30
 NCDOT_APPOINTMENT_URL = "https://skiptheline.ncdot.gov"
 MAX_DISCORD_MESSAGE_LENGTH = 1950 # Slightly less than 2000 for safety margin
+MAX_PUSHOVER_MESSAGE_LENGTH = 1000 # Pushover's limit is 1024, using 1000 for safety
 
 # if you want it to notify you even when there are no appointments available, then set this to true
-PROOF_OF_LIFE = False
-
-if os.getenv("PROOF_OF_LIFE") == "True" or os.getenv("PROOF_OF_LIFE") == True:
-    PROOF_OF_LIFE = True
+PROOF_OF_LIFE = os.getenv("PROOF_OF_LIFE", "False").lower() == "true"
 
 INTRO_MESSAGE = os.getenv("INTRO_MESSAGE", f"@everyone Appointments available at {NCDOT_APPOINTMENT_URL}:\n")
 
@@ -214,18 +214,69 @@ class options_loaded_in_select(object):
         except NoSuchElementException:
             return False
 
-def send_discord_notification(webhook_url, message_content):
-    if not webhook_url or webhook_url == "YOUR_WEBHOOK_URL_HERE":
-        print("Discord webhook URL not configured. Skipping notification.")
+def send_notification(webhook_url, message_content):
+    # --- Pushover ---
+    if PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEYS:
+        if message_content is None and PROOF_OF_LIFE:
+            for user_key in PUSHOVER_USER_KEYS:
+                try:
+                    requests.post("https://api.pushover.net/1/messages.json", data={
+                        "token": PUSHOVER_APP_TOKEN,
+                        "user": user_key,
+                        "title": "NCDMV Scraper",
+                        "message": "No valid appointments found at this time",
+                    }, timeout=10)
+                    print(f"Pushover proof-of-life notification sent to ...{user_key[-4:]}.")
+                except requests.exceptions.RequestException as e:
+                    print(f"Error sending Pushover proof-of-life notification to ...{user_key[-4:]}: {e}")
+            return
+        elif message_content is None:
+            return
+
+        full_message = INTRO_MESSAGE + message_content
+        chunks = []
+        remaining = full_message
+        while remaining:
+            if len(remaining) <= MAX_PUSHOVER_MESSAGE_LENGTH:
+                chunks.append(remaining)
+                remaining = ""
+            else:
+                split_index = remaining.rfind('\n', 0, MAX_PUSHOVER_MESSAGE_LENGTH)
+                if split_index == -1:
+                    split_index = MAX_PUSHOVER_MESSAGE_LENGTH
+                chunks.append(remaining[:split_index])
+                remaining = remaining[split_index:].lstrip()
+
+        print(f"Sending Pushover notification in {len(chunks)} chunk(s) to {len(PUSHOVER_USER_KEYS)} recipient(s)...")
+        for user_key in PUSHOVER_USER_KEYS:
+            for i, chunk in enumerate(chunks):
+                try:
+                    response = requests.post("https://api.pushover.net/1/messages.json", data={
+                        "token": PUSHOVER_APP_TOKEN,
+                        "user": user_key,
+                        "title": "NCDMV Appointments",
+                        "message": chunk,
+                    }, timeout=15)
+                    response.raise_for_status()
+                    print(f"Pushover chunk {i+1}/{len(chunks)} sent to ...{user_key[-4:]}.")
+                    if i < len(chunks) - 1:
+                        time.sleep(1)
+                except requests.exceptions.RequestException as e:
+                    print(f"Error sending Pushover chunk {i+1} to ...{user_key[-4:]}: {e}")
+                    break
         return
 
-    if message_content == None and PROOF_OF_LIFE == True:
+    # --- Discord / ntfy.sh ---
+    if not webhook_url or webhook_url == "YOUR_WEBHOOK_URL_HERE":
+        print("No notification method configured. Skipping notification.")
+        return
+
+    if message_content is None and PROOF_OF_LIFE == True:
         requests.post(webhook_url, json={"content":"No valid appointments found at this time"}, timeout=10)
         return
-    elif message_content == None:
+    elif message_content is None:
         return
 
-    # intro_message = f"@everyone Appointments available at {NCDOT_APPOINTMENT_URL}:\n"
     full_message = INTRO_MESSAGE + message_content
 
     message_chunks = []
@@ -246,12 +297,11 @@ def send_discord_notification(webhook_url, message_content):
             if split_index == MAX_DISCORD_MESSAGE_LENGTH and len(remaining_message) > 0:
                  message_chunks[-1] += "\n... (split)" # forced split in middle of line
 
-
     print(f"Sending notification in {len(message_chunks)} chunk(s)...")
     success = True
     if "https://ntfy.sh/" in webhook_url:
         try:
-            response = requests.post(webhook_url, data=full_message,timeout=10,headers={ "Markdown": "yes" })
+            response = requests.post(webhook_url, data=full_message, timeout=10, headers={"Markdown": "yes"})
             response.raise_for_status()
             print("ntfy notification sent successfully")
         except requests.exceptions.RequestException as e:
@@ -279,9 +329,9 @@ def send_discord_notification(webhook_url, message_content):
                 break
 
     if success:
-        print("All Discord notification chunks sent.")
+        print("All notification chunks sent.")
     else:
-        print("Failed to send all Discord notification chunks.")
+        print("Failed to send all notification chunks.")
 
 
 def format_results_for_discord(raw_results):
@@ -627,9 +677,9 @@ date_filter, dt_start, dt_end, time_filter, tm_start, tm_end = parse_datetime_fi
     TIME_RANGE_START_STR, TIME_RANGE_END_STR
 )
 
-if YOUR_DISCORD_WEBHOOK_URL == "YOUR_WEBHOOK_URL_HERE":
-    print("!!! WARNING: DISCORD WEBHOOK URL IS NOT SET. Notifications will be skipped. !!!")
-    print("!!! Edit the YOUR_DISCORD_WEBHOOK_URL variable in the script. !!!")
+if YOUR_DISCORD_WEBHOOK_URL == "YOUR_WEBHOOK_URL_HERE" and not (PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEYS):
+    print("!!! WARNING: No notification method configured. Notifications will be skipped. !!!")
+    print("!!! Set YOUR_DISCORD_WEBHOOK_URL, or set both PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEY. !!!")
 
 while True:
     print(f"\n--- Starting run at {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
@@ -652,9 +702,9 @@ while True:
     discord_message_content = format_results_for_discord(results)
     if discord_message_content:
         print("Valid appointment times found. Sending notification...")
-        send_discord_notification(YOUR_DISCORD_WEBHOOK_URL, discord_message_content)
+        send_notification(YOUR_DISCORD_WEBHOOK_URL, discord_message_content)
     else:
-        send_discord_notification(YOUR_DISCORD_WEBHOOK_URL, None)
+        send_notification(YOUR_DISCORD_WEBHOOK_URL, None)
         print("No valid appointment times found in this run.")
 
     base_sleep = BASE_INTERVAL_MINUTES * 60
